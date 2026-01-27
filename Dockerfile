@@ -24,8 +24,8 @@ FROM alpine:latest
 
 WORKDIR /app
 
-# Install CA certificates (required for HTTPS) and timezone data
-RUN apk add --no-cache ca-certificates tzdata
+# Install CA certificates, timezone data, and C++ runtime libraries (required for CGO/go-libutp)
+RUN apk add --no-cache ca-certificates tzdata libstdc++ libgcc
 
 # Copy binary from builder
 COPY --from=builder /app/wx_channel .

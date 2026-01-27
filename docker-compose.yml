@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  wx_channel:
+    container_name: wx_channel
+    build: .
+    # 如果想使用 GitHub 构建的镜像，取消注释下行并注释 build: .
+    # image: ghcr.io/cosmo2097/wx_channel:latest
+    restart: unless-stopped
+    ports:
+      - "2025:2025" # 代理端口
+      - "2026:2026" # 管理/控制台端口
+    volumes:
+      - ./downloads:/app/downloads
+      - ./logs:/app/logs
+      # 如果您正在开发前端，可以挂载 web 目录
+      # - ./web:/app/web
+    environment:
+      - TZ=Asia/Shanghai
+    network_mode: "host" # 推荐使用 host 模式以便更好地捕获流量 (Linux), macOS/Windows 下请使用 bridge (默认) 并确保证书安装正确
