@@ -4,9 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math/rand"
-	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,6 +19,7 @@ import (
 	"wx_channel/internal/utils"
 
 	"github.com/qtgolang/SunnyNet/SunnyNet"
+	sunnyHttp "github.com/qtgolang/SunnyNet/src/http"
 )
 
 // BatchHandler 批量下载处理器
@@ -94,12 +94,12 @@ func (t *BatchTask) GetKey() string {
 }
 
 // Handle implements router.Interceptor
-func (h *BatchHandler) Handle(Conn *SunnyNet.HttpConn) bool {
+func (h *BatchHandler) Handle(Conn SunnyNet.ConnHTTP) bool {
 	// Defensive checks
 	if h == nil {
 		return false
 	}
-	if Conn == nil || Conn.Request == nil || Conn.Request.URL == nil {
+	if Conn == nil || Conn.URL() == "" {
 		return false
 	}
 
@@ -156,8 +156,15 @@ func (h *BatchHandler) getDownloadsDir() (string, error) {
 }
 
 // HandleBatchStart 处理批量下载开始请求
-func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *BatchHandler) HandleBatchStart(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/batch_start" {
 		return false
 	}
@@ -165,20 +172,20 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 	utils.Info("📥 [批量下载] 收到 batch_start 请求")
 
 	// 处理 CORS 预检请求
-	if Conn.Request.Method == "OPTIONS" {
+	if Conn.Method() == "OPTIONS" {
 		h.sendSuccessResponse(Conn, map[string]interface{}{"message": "OK"})
 		return true
 	}
 
 	// 只处理 POST 请求
-	if Conn.Request.Method != "POST" {
-		h.sendErrorResponse(Conn, fmt.Errorf("method not allowed: %s", Conn.Request.Method))
+	if Conn.Method() != "POST" {
+		h.sendErrorResponse(Conn, fmt.Errorf("method not allowed: %s", Conn.Method()))
 		return true
 	}
 
 	// 授权校验
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
 			h.sendErrorResponse(Conn, fmt.Errorf("unauthorized"))
 			return true
 		}
@@ -186,21 +193,8 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 
 	utils.Info("📥 [批量下载] 开始读取请求体...")
 
-	// 检查请求体是否为空
-	if Conn.Request.Body == nil {
-		err := fmt.Errorf("request body is nil")
-		utils.HandleError(err, "读取batch_start请求体")
-		h.sendErrorResponse(Conn, err)
-		return true
-	}
-
-	body, err := io.ReadAll(Conn.Request.Body)
-	if err != nil {
-		utils.HandleError(err, "读取batch_start请求体")
-		h.sendErrorResponse(Conn, err)
-		return true
-	}
-	defer Conn.Request.Body.Close()
+	body := Conn.GetRequestBody()
+	// No need to close body
 
 	bodySize := len(body)
 	utils.Info("📥 [批量下载] 请求体大小: %.2f MB", float64(bodySize)/(1024*1024))
@@ -223,8 +217,8 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 	pageSource := req.PageSource
 	if pageSource == "" {
 		// 如果请求体中没有指定，则通过请求头判断
-		origin := Conn.Request.Header.Get("Origin")
-		referer := Conn.Request.Header.Get("Referer")
+		origin := Conn.GetRequestHeader().Get("Origin")
+		referer := Conn.GetRequestHeader().Get("Referer")
 
 		if strings.Contains(origin, "channels.weixin.qq.com") || strings.Contains(referer, "channels.weixin.qq.com") {
 			// 从视频号页面发起的请求，尝试从Referer中提取页面类型
@@ -689,21 +683,28 @@ func parseDurationToMs(duration string) int64 {
 }
 
 // HandleBatchProgress 处理批量下载进度查询请求
-func (h *BatchHandler) HandleBatchProgress(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *BatchHandler) HandleBatchProgress(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/batch_progress" {
 		return false
 	}
 
 	// 处理 CORS 预检请求
-	if Conn.Request.Method == "OPTIONS" {
+	if Conn.Method() == "OPTIONS" {
 		h.sendSuccessResponse(Conn, map[string]interface{}{"message": "OK"})
 		return true
 	}
 
 	// 授权校验
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
 			h.sendErrorResponse(Conn, fmt.Errorf("unauthorized"))
 			return true
 		}
@@ -764,21 +765,28 @@ func (h *BatchHandler) HandleBatchProgress(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleBatchCancel 处理批量下载取消请求
-func (h *BatchHandler) HandleBatchCancel(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *BatchHandler) HandleBatchCancel(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/batch_cancel" {
 		return false
 	}
 
 	// 处理 CORS 预检请求
-	if Conn.Request.Method == "OPTIONS" {
+	if Conn.Method() == "OPTIONS" {
 		h.sendSuccessResponse(Conn, map[string]interface{}{"message": "OK"})
 		return true
 	}
 
 	// 授权校验
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
 			h.sendErrorResponse(Conn, fmt.Errorf("unauthorized"))
 			return true
 		}
@@ -810,21 +818,28 @@ func (h *BatchHandler) HandleBatchCancel(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleBatchFailed 处理导出失败清单请求
-func (h *BatchHandler) HandleBatchFailed(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *BatchHandler) HandleBatchFailed(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/batch_failed" {
 		return false
 	}
 
 	// 处理 CORS 预检请求
-	if Conn.Request.Method == "OPTIONS" {
+	if Conn.Method() == "OPTIONS" {
 		h.sendSuccessResponse(Conn, map[string]interface{}{"message": "OK"})
 		return true
 	}
 
 	// 授权校验
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
 			h.sendErrorResponse(Conn, fmt.Errorf("unauthorized"))
 			return true
 		}
@@ -877,21 +892,28 @@ func (h *BatchHandler) HandleBatchFailed(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleBatchResume 处理继续下载请求（从pending状态恢复）
-func (h *BatchHandler) HandleBatchResume(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *BatchHandler) HandleBatchResume(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/batch_resume" {
 		return false
 	}
 
 	// 处理 CORS 预检请求
-	if Conn.Request.Method == "OPTIONS" {
+	if Conn.Method() == "OPTIONS" {
 		h.sendSuccessResponse(Conn, map[string]interface{}{"message": "OK"})
 		return true
 	}
 
 	// 授权校验
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
 			h.sendErrorResponse(Conn, fmt.Errorf("unauthorized"))
 			return true
 		}
@@ -931,11 +953,8 @@ func (h *BatchHandler) HandleBatchResume(Conn *SunnyNet.HttpConn) bool {
 	var req struct {
 		ForceRedownload bool `json:"forceRedownload"`
 	}
-	if Conn.Request.Body != nil {
-		body, _ := io.ReadAll(Conn.Request.Body)
-		json.Unmarshal(body, &req)
-		Conn.Request.Body.Close()
-	}
+	body := Conn.GetRequestBody()
+	json.Unmarshal(body, &req)
 
 	// 启动下载
 	h.running = true
@@ -954,21 +973,28 @@ func (h *BatchHandler) HandleBatchResume(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleBatchClear 处理清除任务请求
-func (h *BatchHandler) HandleBatchClear(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *BatchHandler) HandleBatchClear(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/batch_clear" {
 		return false
 	}
 
 	// 处理 CORS 预检请求
-	if Conn.Request.Method == "OPTIONS" {
+	if Conn.Method() == "OPTIONS" {
 		h.sendSuccessResponse(Conn, map[string]interface{}{"message": "OK"})
 		return true
 	}
 
 	// 授权校验
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
 			h.sendErrorResponse(Conn, fmt.Errorf("unauthorized"))
 			return true
 		}
@@ -998,7 +1024,7 @@ func (h *BatchHandler) HandleBatchClear(Conn *SunnyNet.HttpConn) bool {
 }
 
 // sendSuccessResponse 发送成功响应
-func (h *BatchHandler) sendSuccessResponse(Conn *SunnyNet.HttpConn, data map[string]interface{}) {
+func (h *BatchHandler) sendSuccessResponse(Conn SunnyNet.ConnHTTP, data map[string]interface{}) {
 	data["success"] = true
 
 	responseBytes, err := json.Marshal(data)
@@ -1007,12 +1033,12 @@ func (h *BatchHandler) sendSuccessResponse(Conn *SunnyNet.HttpConn, data map[str
 		return
 	}
 
-	headers := http.Header{}
+	headers := sunnyHttp.Header{}
 	headers.Set("Content-Type", "application/json")
 	headers.Set("X-Content-Type-Options", "nosniff")
 
 	// CORS - 允许所有来源（因为是本地服务）
-	origin := Conn.Request.Header.Get("Origin")
+	origin := Conn.GetRequestHeader().Get("Origin")
 	if origin != "" {
 		headers.Set("Access-Control-Allow-Origin", origin)
 		headers.Set("Vary", "Origin")
@@ -1025,13 +1051,13 @@ func (h *BatchHandler) sendSuccessResponse(Conn *SunnyNet.HttpConn, data map[str
 }
 
 // sendErrorResponse 发送错误响应
-func (h *BatchHandler) sendErrorResponse(Conn *SunnyNet.HttpConn, err error) {
-	headers := http.Header{}
+func (h *BatchHandler) sendErrorResponse(Conn SunnyNet.ConnHTTP, err error) {
+	headers := sunnyHttp.Header{}
 	headers.Set("Content-Type", "application/json")
 	headers.Set("X-Content-Type-Options", "nosniff")
 
 	// CORS - 允许所有来源（因为是本地服务）
-	origin := Conn.Request.Header.Get("Origin")
+	origin := Conn.GetRequestHeader().Get("Origin")
 	if origin != "" {
 		headers.Set("Access-Control-Allow-Origin", origin)
 		headers.Set("Vary", "Origin")

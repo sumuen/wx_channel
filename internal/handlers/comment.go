@@ -3,8 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"wx_channel/internal/utils"
 
 	"github.com/qtgolang/SunnyNet/SunnyNet"
+	sunnyHttp "github.com/qtgolang/SunnyNet/src/http"
 )
 
 // CommentHandler 评论数据处理器
@@ -30,25 +30,32 @@ func (h *CommentHandler) getConfig() *config.Config {
 }
 
 // Handle implements router.Interceptor
-func (h *CommentHandler) Handle(Conn *SunnyNet.HttpConn) bool {
+func (h *CommentHandler) Handle(Conn SunnyNet.ConnHTTP) bool {
 
 	return h.HandleSaveCommentData(Conn)
 }
 
 // HandleSaveCommentData 处理保存评论数据请求
-func (h *CommentHandler) HandleSaveCommentData(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *CommentHandler) HandleSaveCommentData(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/save_comment_data" {
 		return false
 	}
 
 	// 授权校验
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
 			// 记录认证失败
-			clientIP := Conn.Request.RemoteAddr
+			clientIP := Conn.ClientIP()
 			utils.LogAuthFailed(path, clientIP)
-			headers := http.Header{}
+			headers := sunnyHttp.Header{}
 			headers.Set("Content-Type", "application/json")
 			headers.Set("X-Content-Type-Options", "nosniff")
 			Conn.StopRequest(401, `{"success":false,"error":"unauthorized"}`, headers)
@@ -58,7 +65,7 @@ func (h *CommentHandler) HandleSaveCommentData(Conn *SunnyNet.HttpConn) bool {
 
 	// CORS校验
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			allowed := false
 			for _, o := range h.getConfig().AllowedOrigins {
@@ -70,7 +77,7 @@ func (h *CommentHandler) HandleSaveCommentData(Conn *SunnyNet.HttpConn) bool {
 			if !allowed {
 				// 记录CORS拦截
 				utils.LogCORSBlocked(origin, path)
-				headers := http.Header{}
+				headers := sunnyHttp.Header{}
 				headers.Set("Content-Type", "application/json")
 				headers.Set("X-Content-Type-Options", "nosniff")
 				Conn.StopRequest(403, `{"success":false,"error":"forbidden_origin"}`, headers)
@@ -87,16 +94,7 @@ func (h *CommentHandler) HandleSaveCommentData(Conn *SunnyNet.HttpConn) bool {
 		Timestamp            int64                    `json:"timestamp"`
 	}
 
-	body, err := io.ReadAll(Conn.Request.Body)
-	if err != nil {
-		utils.HandleError(err, "读取save_comment_data请求体")
-		h.sendErrorResponse(Conn, err)
-		return true
-	}
-
-	if err := Conn.Request.Body.Close(); err != nil {
-		utils.HandleError(err, "关闭请求体")
-	}
+	body := Conn.GetRequestBody()
 
 	// 检查body是否为空
 	if len(body) == 0 {
@@ -220,14 +218,14 @@ func (h *CommentHandler) saveCommentData(comments []map[string]interface{}, vide
 }
 
 // sendEmptyResponse 发送空JSON响应
-func (h *CommentHandler) sendEmptyResponse(Conn *SunnyNet.HttpConn) {
-	headers := http.Header{}
+func (h *CommentHandler) sendEmptyResponse(Conn SunnyNet.ConnHTTP) {
+	headers := sunnyHttp.Header{}
 	headers.Set("Content-Type", "application/json")
 	headers.Set("X-Content-Type-Options", "nosniff")
 
 	// CORS
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			for _, o := range h.getConfig().AllowedOrigins {
 				if o == origin {
@@ -246,14 +244,14 @@ func (h *CommentHandler) sendEmptyResponse(Conn *SunnyNet.HttpConn) {
 }
 
 // sendErrorResponse 发送错误响应
-func (h *CommentHandler) sendErrorResponse(Conn *SunnyNet.HttpConn, err error) {
-	headers := http.Header{}
+func (h *CommentHandler) sendErrorResponse(Conn SunnyNet.ConnHTTP, err error) {
+	headers := sunnyHttp.Header{}
 	headers.Set("Content-Type", "application/json")
 	headers.Set("X-Content-Type-Options", "nosniff")
 
 	// CORS
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			for _, o := range h.getConfig().AllowedOrigins {
 				if o == origin {

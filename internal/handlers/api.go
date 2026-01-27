@@ -3,8 +3,6 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -20,6 +18,7 @@ import (
 	"github.com/fatih/color"
 
 	"github.com/qtgolang/SunnyNet/SunnyNet"
+	sunnyHttp "github.com/qtgolang/SunnyNet/src/http"
 )
 
 // APIHandler API请求处理器
@@ -54,11 +53,17 @@ func (h *APIHandler) GetCurrentURL() string {
 }
 
 // Handle implements router.Interceptor
-func (h *APIHandler) Handle(Conn *SunnyNet.HttpConn) bool {
+func (h *APIHandler) Handle(Conn SunnyNet.ConnHTTP) bool {
 	// CORS Preflight for all __wx_channels_api requests
-	if Conn.Request == nil || Conn.Request.URL == nil {
+	if Conn.URL() == "" {
 		return false
 	}
+
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 
 	// Add local panic recovery
 	defer func() {
@@ -67,7 +72,7 @@ func (h *APIHandler) Handle(Conn *SunnyNet.HttpConn) bool {
 		}
 	}()
 
-	if strings.HasPrefix(Conn.Request.URL.Path, "/__wx_channels_api/") && Conn.Request.Method == "OPTIONS" {
+	if strings.HasPrefix(path, "/__wx_channels_api/") && Conn.Method() == "OPTIONS" {
 		h.handleCORS(Conn)
 		return true
 	}
@@ -90,12 +95,12 @@ func (h *APIHandler) Handle(Conn *SunnyNet.HttpConn) bool {
 }
 
 // handleCORS 处理CORS预检请求
-func (h *APIHandler) handleCORS(Conn *SunnyNet.HttpConn) {
-	headers := http.Header{}
+func (h *APIHandler) handleCORS(Conn SunnyNet.ConnHTTP) {
+	headers := sunnyHttp.Header{}
 	headers.Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	headers.Set("Access-Control-Allow-Headers", "Content-Type, X-Local-Auth")
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		for _, o := range h.getConfig().AllowedOrigins {
 			if o == origin {
 				headers.Set("Access-Control-Allow-Origin", origin)
@@ -108,8 +113,15 @@ func (h *APIHandler) handleCORS(Conn *SunnyNet.HttpConn) {
 }
 
 // HandleSavePageContent 处理页面内容保存请求
-func (h *APIHandler) HandleSavePageContent(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *APIHandler) HandleSavePageContent(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/save_page_content" {
 		return false
 	}
@@ -119,14 +131,9 @@ func (h *APIHandler) HandleSavePageContent(Conn *SunnyNet.HttpConn) bool {
 		HTML      string `json:"html"`
 		Timestamp int64  `json:"timestamp"`
 	}
-	body, err := io.ReadAll(Conn.Request.Body)
-	if err != nil {
-		utils.HandleError(err, "读取save_page_content请求体")
-		return true
-	}
-	if err := Conn.Request.Body.Close(); err != nil {
-		utils.HandleError(err, "关闭请求体")
-	}
+	body := Conn.GetRequestBody()
+	// No need to close body as we got bytes directly
+
 	err = json.Unmarshal(body, &contentData)
 	if err != nil {
 		utils.HandleError(err, "解析页面内容数据")
@@ -138,7 +145,7 @@ func (h *APIHandler) HandleSavePageContent(Conn *SunnyNet.HttpConn) bool {
 			h.saveDynamicHTML(contentData.HTML, parsedURL, contentData.URL, contentData.Timestamp)
 		}
 	}
-	headers := http.Header{}
+	headers := sunnyHttp.Header{}
 	headers.Set("Content-Type", "application/json")
 	headers.Set("__debug", "fake_resp")
 	Conn.StopRequest(200, "{}", headers)
@@ -255,8 +262,15 @@ func (h *APIHandler) saveDynamicHTML(htmlContent string, parsedURL *url.URL, ful
 }
 
 // HandleProfile 处理视频信息请求
-func (h *APIHandler) HandleProfile(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *APIHandler) HandleProfile(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/profile" {
 		return false
 	}
@@ -264,8 +278,8 @@ func (h *APIHandler) HandleProfile(Conn *SunnyNet.HttpConn) bool {
 
 	// 授权与来源校验（可选）
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
-			headers := http.Header{}
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
+			headers := sunnyHttp.Header{}
 			headers.Set("Content-Type", "application/json")
 			headers.Set("X-Content-Type-Options", "nosniff")
 			Conn.StopRequest(401, `{"success":false,"error":"unauthorized"}`, headers)
@@ -273,7 +287,7 @@ func (h *APIHandler) HandleProfile(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			allowed := false
 			for _, o := range h.getConfig().AllowedOrigins {
@@ -283,7 +297,7 @@ func (h *APIHandler) HandleProfile(Conn *SunnyNet.HttpConn) bool {
 				}
 			}
 			if !allowed {
-				headers := http.Header{}
+				headers := sunnyHttp.Header{}
 				headers.Set("Content-Type", "application/json")
 				headers.Set("X-Content-Type-Options", "nosniff")
 				Conn.StopRequest(403, `{"success":false,"error":"forbidden_origin"}`, headers)
@@ -293,16 +307,8 @@ func (h *APIHandler) HandleProfile(Conn *SunnyNet.HttpConn) bool {
 	}
 
 	var data map[string]interface{}
-	body, err := io.ReadAll(Conn.Request.Body)
-	if err != nil {
-		utils.HandleError(err, "读取profile请求体")
-		h.sendErrorResponse(Conn, err)
-		return true
-	}
-
-	if err := Conn.Request.Body.Close(); err != nil {
-		utils.HandleError(err, "关闭请求体")
-	}
+	body := Conn.GetRequestBody()
+	// No need to close body
 
 	err = json.Unmarshal(body, &data)
 	if err != nil {
@@ -579,15 +585,22 @@ func (h *APIHandler) saveBrowseRecord(videoID, title, author, authorID string, d
 }
 
 // HandleTip 处理前端提示请求
-func (h *APIHandler) HandleTip(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *APIHandler) HandleTip(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/tip" {
 		return false
 	}
 
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
-			headers := http.Header{}
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
+			headers := sunnyHttp.Header{}
 			headers.Set("Content-Type", "application/json")
 			headers.Set("X-Content-Type-Options", "nosniff")
 			Conn.StopRequest(401, `{"success":false,"error":"unauthorized"}`, headers)
@@ -595,7 +608,7 @@ func (h *APIHandler) HandleTip(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			allowed := false
 			for _, o := range h.getConfig().AllowedOrigins {
@@ -605,7 +618,7 @@ func (h *APIHandler) HandleTip(Conn *SunnyNet.HttpConn) bool {
 				}
 			}
 			if !allowed {
-				headers := http.Header{}
+				headers := sunnyHttp.Header{}
 				headers.Set("Content-Type", "application/json")
 				headers.Set("X-Content-Type-Options", "nosniff")
 				Conn.StopRequest(403, `{"success":false,"error":"forbidden_origin"}`, headers)
@@ -618,16 +631,8 @@ func (h *APIHandler) HandleTip(Conn *SunnyNet.HttpConn) bool {
 		Msg string `json:"msg"`
 	}
 
-	body, err := io.ReadAll(Conn.Request.Body)
-	if err != nil {
-		utils.HandleError(err, "读取tip请求体")
-		h.sendErrorResponse(Conn, err)
-		return true
-	}
-
-	if err := Conn.Request.Body.Close(); err != nil {
-		utils.HandleError(err, "关闭请求体")
-	}
+	body := Conn.GetRequestBody()
+	// No need to close body
 
 	// 检查body是否为空
 	if len(body) == 0 {
@@ -766,15 +771,22 @@ func (h *APIHandler) HandleTip(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandlePageURL 处理页面URL请求
-func (h *APIHandler) HandlePageURL(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *APIHandler) HandlePageURL(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/page_url" {
 		return false
 	}
 
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
-			headers := http.Header{}
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
+			headers := sunnyHttp.Header{}
 			headers.Set("Content-Type", "application/json")
 			headers.Set("X-Content-Type-Options", "nosniff")
 			Conn.StopRequest(401, `{"success":false,"error":"unauthorized"}`, headers)
@@ -782,7 +794,7 @@ func (h *APIHandler) HandlePageURL(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			allowed := false
 			for _, o := range h.getConfig().AllowedOrigins {
@@ -792,7 +804,7 @@ func (h *APIHandler) HandlePageURL(Conn *SunnyNet.HttpConn) bool {
 				}
 			}
 			if !allowed {
-				headers := http.Header{}
+				headers := sunnyHttp.Header{}
 				headers.Set("Content-Type", "application/json")
 				headers.Set("X-Content-Type-Options", "nosniff")
 				Conn.StopRequest(403, `{"success":false,"error":"forbidden_origin"}`, headers)
@@ -805,16 +817,7 @@ func (h *APIHandler) HandlePageURL(Conn *SunnyNet.HttpConn) bool {
 		URL string `json:"url"`
 	}
 
-	body, err := io.ReadAll(Conn.Request.Body)
-	if err != nil {
-		utils.HandleError(err, "读取page_url请求体")
-		h.sendErrorResponse(Conn, err)
-		return true
-	}
-
-	if err := Conn.Request.Body.Close(); err != nil {
-		utils.HandleError(err, "关闭请求体")
-	}
+	body := Conn.GetRequestBody()
 
 	err = json.Unmarshal(body, &urlData)
 	if err != nil {
@@ -839,11 +842,18 @@ func (h *APIHandler) HandlePageURL(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleStaticFiles 处理静态文件请求（jszip, FileSaver等）
-func HandleStaticFiles(Conn *SunnyNet.HttpConn, zipJS, fileSaverJS []byte) bool {
-	path := Conn.Request.URL.Path
+func HandleStaticFiles(Conn SunnyNet.ConnHTTP, zipJS, fileSaverJS []byte) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 
 	if util.Includes(path, "jszip") {
-		headers := http.Header{}
+		headers := sunnyHttp.Header{}
 		headers.Set("Content-Type", "application/javascript")
 		headers.Set("__debug", "local_file")
 		Conn.StopRequest(200, zipJS, headers)
@@ -851,7 +861,7 @@ func HandleStaticFiles(Conn *SunnyNet.HttpConn, zipJS, fileSaverJS []byte) bool 
 	}
 
 	if util.Includes(path, "FileSaver.min") {
-		headers := http.Header{}
+		headers := sunnyHttp.Header{}
 		headers.Set("Content-Type", "application/javascript")
 		headers.Set("__debug", "local_file")
 		Conn.StopRequest(200, fileSaverJS, headers)
@@ -862,27 +872,25 @@ func HandleStaticFiles(Conn *SunnyNet.HttpConn, zipJS, fileSaverJS []byte) bool 
 }
 
 // sendEmptyResponse 发送空JSON响应
-func (h *APIHandler) sendEmptyResponse(Conn *SunnyNet.HttpConn) {
+func (h *APIHandler) sendEmptyResponse(Conn SunnyNet.ConnHTTP) {
 	if Conn == nil {
 		utils.Warn("sendEmptyResponse: Conn is nil")
 		return
 	}
-	headers := http.Header{}
+	headers := sunnyHttp.Header{}
 	headers.Set("Content-Type", "application/json")
 	headers.Set("X-Content-Type-Options", "nosniff")
 	// CORS
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		if Conn.Request != nil && Conn.Request.Header != nil {
-			origin := Conn.Request.Header.Get("Origin")
-			if origin != "" {
-				for _, o := range h.getConfig().AllowedOrigins {
-					if o == origin {
-						headers.Set("Access-Control-Allow-Origin", origin)
-						headers.Set("Vary", "Origin")
-						headers.Set("Access-Control-Allow-Headers", "Content-Type, X-Local-Auth")
-						headers.Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-						break
-					}
+		origin := Conn.GetRequestHeader().Get("Origin")
+		if origin != "" {
+			for _, o := range h.getConfig().AllowedOrigins {
+				if o == origin {
+					headers.Set("Access-Control-Allow-Origin", origin)
+					headers.Set("Vary", "Origin")
+					headers.Set("Access-Control-Allow-Headers", "Content-Type, X-Local-Auth")
+					headers.Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+					break
 				}
 			}
 		}
@@ -892,12 +900,12 @@ func (h *APIHandler) sendEmptyResponse(Conn *SunnyNet.HttpConn) {
 }
 
 // sendErrorResponse 发送错误响应
-func (h *APIHandler) sendErrorResponse(Conn *SunnyNet.HttpConn, err error) {
-	headers := http.Header{}
+func (h *APIHandler) sendErrorResponse(Conn SunnyNet.ConnHTTP, err error) {
+	headers := sunnyHttp.Header{}
 	headers.Set("Content-Type", "application/json")
 	headers.Set("X-Content-Type-Options", "nosniff")
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			for _, o := range h.getConfig().AllowedOrigins {
 				if o == origin {

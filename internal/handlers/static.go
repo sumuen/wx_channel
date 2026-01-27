@@ -1,13 +1,14 @@
 package handlers
 
 import (
-	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
 	"wx_channel/internal/utils"
 
 	"github.com/qtgolang/SunnyNet/SunnyNet"
+	"github.com/qtgolang/SunnyNet/src/http"
 )
 
 // StaticFileHandler 处理静态文件请求
@@ -20,12 +21,17 @@ func NewStaticFileHandler() *StaticFileHandler {
 }
 
 // Handle implements router.Interceptor
-func (h *StaticFileHandler) Handle(Conn *SunnyNet.HttpConn) bool {
+func (h *StaticFileHandler) Handle(Conn SunnyNet.ConnHTTP) bool {
 
-	if Conn.Request == nil || Conn.Request.URL == nil {
+	if Conn.URL() == "" {
 		return false
 	}
-	path := Conn.Request.URL.Path
+
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 
 	// 1. 处理控制台页面重定向/加载
 	if path == "/console" || path == "/console/" {

@@ -165,3 +165,4 @@ log.png
 # - web/          Web 控制台源代码（暂不公开）
 # - *.zip         所有压缩文件
 # - *.exe         编译产物
+wx_channel

@@ -2,6 +2,7 @@ package router
 
 import (
 	"net/http"
+	"net/url"
 
 	"wx_channel/internal/api"
 	"wx_channel/internal/config"
@@ -28,23 +29,31 @@ type APIRouter struct {
 }
 
 // Handle implements Interceptor
-func (r *APIRouter) Handle(Conn *SunnyNet.HttpConn) bool {
+func (r *APIRouter) Handle(Conn SunnyNet.ConnHTTP) bool {
 
 	// 防御性检查
-	if r == nil {
+	if r == nil || Conn == nil || Conn.URL() == "" {
 		return false
 	}
-	if Conn == nil || Conn.Request == nil || Conn.Request.URL == nil {
+
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
 		return false
 	}
 
 	// 仅处理 /api/ 请求
-	if !strings.HasPrefix(Conn.Request.URL.Path, "/api/") {
+	if !strings.HasPrefix(u.Path, "/api/") {
+		return false
+	}
+
+	req, err := ToStdRequest(Conn)
+	if err != nil {
+		// allow other handlers to process if conversion fails? or stop?
 		return false
 	}
 
 	w := NewSunnyNetResponseWriter(Conn)
-	r.ServeHTTP(w, Conn.Request)
+	r.ServeHTTP(w, req)
 	w.Flush()
 	return true
 }

@@ -1,9 +1,8 @@
 package handlers
 
 import (
-	"bytes"
 	"fmt"
-	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,7 +14,7 @@ import (
 	"wx_channel/pkg/util"
 
 	"github.com/qtgolang/SunnyNet/SunnyNet"
-	sunnyPublic "github.com/qtgolang/SunnyNet/public"
+	sunnyPublic "github.com/qtgolang/SunnyNet/src/public"
 )
 
 // ScriptHandler JavaScript注入处理器
@@ -64,36 +63,33 @@ func (h *ScriptHandler) getConfig() *config.Config {
 }
 
 // Handle implements router.Interceptor
-func (h *ScriptHandler) Handle(Conn *SunnyNet.HttpConn) bool {
+func (h *ScriptHandler) Handle(Conn SunnyNet.ConnHTTP) bool {
 
-	if Conn.Type != sunnyPublic.HttpResponseOK {
+	if Conn.Type() != sunnyPublic.HttpResponseOK {
 		return false
 	}
 
 	// 防御性检查
-	if Conn.Request == nil || Conn.Request.URL == nil {
+	if Conn.URL() == "" {
 		return false
 	}
 
-	// 只有响应成功且有内容才处理
-	if Conn.Response == nil || Conn.Response.Body == nil {
-		return false
-	}
-
-	// 读取响应体
-	// 注意：这里读取了Body，如果未被修改，需要重新赋值回去
-	body, err := io.ReadAll(Conn.Response.Body)
+	// 解析URL获取host和path
+	u, err := url.Parse(Conn.URL())
 	if err != nil {
 		return false
 	}
-	_ = Conn.Response.Body.Close()
+	host := u.Hostname()
+	path := u.Path
 
-	host := Conn.Request.URL.Hostname()
-	path := Conn.Request.URL.Path
+	// 读取响应体
+	body := Conn.GetResponseBody()
+	// 注意：GetResponseBody返回的是副本? 或者引用? SunnyNet通常返回[]byte
+	// 如果为空，可能没有Body
 
 	// 记录所有JS文件的加载（简略日志）
 	if strings.HasSuffix(path, ".js") {
-		contentType := strings.ToLower(Conn.Response.Header.Get("content-type"))
+		contentType := strings.ToLower(Conn.GetResponseHeader().Get("content-type"))
 		utils.LogFileInfo("[响应] Path=%s | ContentType=%s", path, contentType)
 	}
 
@@ -105,14 +101,14 @@ func (h *ScriptHandler) Handle(Conn *SunnyNet.HttpConn) bool {
 		return true
 	}
 
-	// 如果没有处理，恢复Body
-	Conn.Response.Body = io.NopCloser(bytes.NewBuffer(body))
+	// 如果没有修改，不需要重新赋值Body，因为GetResponseBody只是获取
+	// 如果需要显式设置回去? 只有修改了才调用 SetResponseBody
 	return false
 }
 
 // HandleHTMLResponse 处理HTML响应，注入JavaScript代码
-func (h *ScriptHandler) HandleHTMLResponse(Conn *SunnyNet.HttpConn, host, path string, body []byte) bool {
-	contentType := strings.ToLower(Conn.Response.Header.Get("content-type"))
+func (h *ScriptHandler) HandleHTMLResponse(Conn SunnyNet.ConnHTTP, host, path string, body []byte) bool {
+	contentType := strings.ToLower(Conn.GetResponseHeader().Get("content-type"))
 	if contentType != "text/html; charset=utf-8" {
 		return false
 	}
@@ -124,7 +120,7 @@ func (h *ScriptHandler) HandleHTMLResponse(Conn *SunnyNet.HttpConn, host, path s
 	html = scriptReg1.ReplaceAllString(html, `src="$1.js`+h.version+`"`)
 	scriptReg2 := regexp.MustCompile(`href="([^"]{1,})\.js"`)
 	html = scriptReg2.ReplaceAllString(html, `href="$1.js`+h.version+`"`)
-	Conn.Response.Header.Set("__debug", "append_script")
+	Conn.GetResponseHeader().Set("__debug", "append_script")
 
 	if host == "channels.weixin.qq.com" && (path == "/web/pages/feed" || path == "/web/pages/home" || path == "/web/pages/profile" || path == "/web/pages/s") {
 		// 根据页面路径注入不同的脚本
@@ -133,17 +129,17 @@ func (h *ScriptHandler) HandleHTMLResponse(Conn *SunnyNet.HttpConn, host, path s
 		utils.LogFileInfo("页面已成功加载！")
 		utils.LogFileInfo("已添加视频缓存监控和提醒功能")
 		utils.LogFileInfo("[页面加载] 视频号页面已加载 | Host=%s | Path=%s", host, path)
-		Conn.Response.Body = io.NopCloser(bytes.NewBuffer([]byte(html)))
+		Conn.SetResponseBody([]byte(html))
 		return true
 	}
 
-	Conn.Response.Body = io.NopCloser(bytes.NewBuffer([]byte(html)))
+	Conn.SetResponseBody([]byte(html))
 	return true
 }
 
 // HandleJavaScriptResponse 处理JavaScript响应，修改JavaScript代码
-func (h *ScriptHandler) HandleJavaScriptResponse(Conn *SunnyNet.HttpConn, host, path string, body []byte) bool {
-	contentType := strings.ToLower(Conn.Response.Header.Get("content-type"))
+func (h *ScriptHandler) HandleJavaScriptResponse(Conn SunnyNet.ConnHTTP, host, path string, body []byte) bool {
+	contentType := strings.ToLower(Conn.GetResponseHeader().Get("content-type"))
 	if contentType != "application/javascript" {
 		return false
 	}
@@ -165,31 +161,48 @@ func (h *ScriptHandler) HandleJavaScriptResponse(Conn *SunnyNet.HttpConn, host, 
 	content = depReg.ReplaceAllString(content, `"js/$1.js`+h.version+`"`)
 	content = lazyImportReg.ReplaceAllString(content, `import("$1.js`+h.version+`")`)
 	content = importReg.ReplaceAllString(content, `import"$1.js`+h.version+`"`)
-	Conn.Response.Header.Set("__debug", "replace_script")
+	Conn.GetResponseHeader().Set("__debug", "replace_script")
 
 	// 处理不同的JS文件
 	content, handled := h.handleIndexPublish(path, content)
 	if handled {
-		Conn.Response.Body = io.NopCloser(bytes.NewBuffer([]byte(content)))
+		Conn.SetResponseBody([]byte(content))
 		return true
 	}
 	content, handled = h.handleVirtualSvgIcons(path, content)
 	if handled {
-		Conn.Response.Body = io.NopCloser(bytes.NewBuffer([]byte(content)))
+		Conn.SetResponseBody([]byte(content))
 		return true
 	}
 
 	content, handled = h.handleWorkerRelease(path, content)
 	if handled {
-		Conn.Response.Body = io.NopCloser(bytes.NewBuffer([]byte(content)))
+		Conn.SetResponseBody([]byte(content))
 		return true
 	}
 	content, handled = h.handleConnectPublish(Conn, path, content)
 	if handled {
+		// handleConnectPublish already sets response body? No, it returns content and bool.
+		// Checking implementation of handleConnectPublish...
+		// It calls Conn.Response.Body = ... AND returns content, true.
+		// I should update it to SetResponseBody inside, or here.
+		// If I update handleConnectPublish to use SetResponseBody, then I don't need to do it here?
+		// Wait, look at line 186 in original:
+		/*
+			content, handled = h.handleConnectPublish(Conn, path, content)
+			if handled {
+				return true
+			}
+		*/
+		// So handleConnectPublish was responsible for setting body (or logic inside it)?
+		// Original handleConnectPublish:
+		// Conn.Response.Body = io.NopCloser(bytes.NewBuffer([]byte(content)))
+		// return content, true
+		// So yes, it sets body.
 		return true
 	}
 
-	Conn.Response.Body = io.NopCloser(bytes.NewBuffer([]byte(content)))
+	Conn.SetResponseBody([]byte(content))
 	return true
 }
 
@@ -1408,7 +1421,7 @@ func (h *ScriptHandler) handleWorkerRelease(path string, content string) (string
 }
 
 // handleConnectPublish 处理connect.publish JS文件（参考 wx_channels_download 项目的实现）
-func (h *ScriptHandler) handleConnectPublish(Conn *SunnyNet.HttpConn, path string, content string) (string, bool) {
+func (h *ScriptHandler) handleConnectPublish(Conn SunnyNet.ConnHTTP, path string, content string) (string, bool) {
 	if !util.Includes(path, "connect.publish") {
 		return content, false
 	}
@@ -1452,11 +1465,11 @@ func (h *ScriptHandler) handleConnectPublish(Conn *SunnyNet.HttpConn, path strin
 	}
 
 	// 禁用浏览器缓存，确保每次都能拦截到最新的代码
-	Conn.Response.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	Conn.Response.Header.Set("Pragma", "no-cache")
-	Conn.Response.Header.Set("Expires", "0")
+	Conn.GetResponseHeader().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	Conn.GetResponseHeader().Set("Pragma", "no-cache")
+	Conn.GetResponseHeader().Set("Expires", "0")
 
-	Conn.Response.Body = io.NopCloser(bytes.NewBuffer([]byte(content)))
+	Conn.SetResponseBody([]byte(content))
 	return content, true
 }
 

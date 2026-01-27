@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,6 +27,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/qtgolang/SunnyNet/SunnyNet"
+	sunnyHttp "github.com/qtgolang/SunnyNet/src/http"
 )
 
 // UploadHandler 文件上传处理器
@@ -61,6 +64,23 @@ func (h *UploadHandler) getConfig() *config.Config {
 	return config.Get()
 }
 
+// getStdRequest converts SunnyNet.ConnHTTP to *http.Request for multipart parsing
+func (h *UploadHandler) getStdRequest(Conn SunnyNet.ConnHTTP) (*http.Request, error) {
+	body := Conn.GetRequestBody()
+	req, err := http.NewRequest(Conn.Method(), Conn.URL(), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	// Copy headers
+	sunnyHeaders := Conn.GetRequestHeader()
+	for k, v := range sunnyHeaders {
+		for _, val := range v {
+			req.Header.Add(k, val)
+		}
+	}
+	return req, nil
+}
+
 // getDownloadsDir 获取解析后的下载目录
 func (h *UploadHandler) getDownloadsDir() (string, error) {
 	cfg := h.getConfig()
@@ -71,9 +91,9 @@ func (h *UploadHandler) getDownloadsDir() (string, error) {
 }
 
 // Handle implements router.Interceptor
-func (h *UploadHandler) Handle(Conn *SunnyNet.HttpConn) bool {
+func (h *UploadHandler) Handle(Conn SunnyNet.ConnHTTP) bool {
 	// Critical nil check
-	if Conn == nil || Conn.Request == nil || Conn.Request.URL == nil {
+	if Conn == nil || Conn.URL() == "" {
 		return false
 	}
 
@@ -105,33 +125,39 @@ func (h *UploadHandler) Handle(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleCancelDownload 处理取消下载请求
-func (h *UploadHandler) HandleCancelDownload(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *UploadHandler) HandleCancelDownload(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/cancel_download" {
 		return false
 	}
 
 	// 允许 POST 或 GET 请求
-	if Conn.Request.Method != "POST" && Conn.Request.Method != "GET" {
-		h.sendErrorResponse(Conn, fmt.Errorf("method not allowed: %s", Conn.Request.Method))
+	if Conn.Method() != "POST" && Conn.Method() != "GET" {
+		h.sendErrorResponse(Conn, fmt.Errorf("method not allowed: %s", Conn.Method()))
 		return true
 	}
 
 	var videoId string
 
-	if Conn.Request.Method == "GET" {
-		videoId = Conn.Request.URL.Query().Get("videoId")
+	if Conn.Method() == "GET" {
+		videoId = u.Query().Get("videoId")
 	} else {
 		// POST 请求解析Body
-		body, err := io.ReadAll(Conn.Request.Body)
-		if err == nil {
+		body := Conn.GetRequestBody()
+		if len(body) > 0 {
 			var req struct {
 				VideoID string `json:"videoId"`
 			}
 			json.Unmarshal(body, &req)
 			videoId = req.VideoID
 		}
-		_ = Conn.Request.Body.Close()
 	}
 
 	if videoId == "" {
@@ -159,15 +185,22 @@ func (h *UploadHandler) HandleCancelDownload(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleInitUpload 处理分片上传初始化请求
-func (h *UploadHandler) HandleInitUpload(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *UploadHandler) HandleInitUpload(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/init_upload" {
 		return false
 	}
 
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
-			headers := http.Header{}
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
+			headers := sunnyHttp.Header{}
 			headers.Set("Content-Type", "application/json")
 			headers.Set("X-Content-Type-Options", "nosniff")
 			Conn.StopRequest(401, `{"success":false,"error":"unauthorized"}`, headers)
@@ -175,7 +208,7 @@ func (h *UploadHandler) HandleInitUpload(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			allowed := false
 			for _, o := range h.getConfig().AllowedOrigins {
@@ -185,7 +218,7 @@ func (h *UploadHandler) HandleInitUpload(Conn *SunnyNet.HttpConn) bool {
 				}
 			}
 			if !allowed {
-				headers := http.Header{}
+				headers := sunnyHttp.Header{}
 				headers.Set("Content-Type", "application/json")
 				headers.Set("X-Content-Type-Options", "nosniff")
 				Conn.StopRequest(403, `{"success":false,"error":"forbidden_origin"}`, headers)
@@ -247,8 +280,15 @@ func (h *UploadHandler) HandleInitUpload(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleUploadChunk 处理分片上传请求
-func (h *UploadHandler) HandleUploadChunk(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *UploadHandler) HandleUploadChunk(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/upload_chunk" {
 		return false
 	}
@@ -260,8 +300,8 @@ func (h *UploadHandler) HandleUploadChunk(Conn *SunnyNet.HttpConn) bool {
 	}
 
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
-			headers := http.Header{}
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
+			headers := sunnyHttp.Header{}
 			headers.Set("Content-Type", "application/json")
 			headers.Set("X-Content-Type-Options", "nosniff")
 			Conn.StopRequest(401, `{"success":false,"error":"unauthorized"}`, headers)
@@ -269,7 +309,7 @@ func (h *UploadHandler) HandleUploadChunk(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			allowed := false
 			for _, o := range h.getConfig().AllowedOrigins {
@@ -279,7 +319,7 @@ func (h *UploadHandler) HandleUploadChunk(Conn *SunnyNet.HttpConn) bool {
 				}
 			}
 			if !allowed {
-				headers := http.Header{}
+				headers := sunnyHttp.Header{}
 				headers.Set("Content-Type", "application/json")
 				headers.Set("X-Content-Type-Options", "nosniff")
 				Conn.StopRequest(403, `{"success":false,"error":"forbidden_origin"}`, headers)
@@ -289,16 +329,23 @@ func (h *UploadHandler) HandleUploadChunk(Conn *SunnyNet.HttpConn) bool {
 	}
 
 	// 解析multipart表单
-	err := Conn.Request.ParseMultipartForm(h.getConfig().MaxUploadSize)
+	req, err := h.getStdRequest(Conn)
+	if err != nil {
+		utils.HandleError(err, "创建标准请求")
+		h.sendErrorResponse(Conn, err)
+		return true
+	}
+
+	err = req.ParseMultipartForm(h.getConfig().MaxUploadSize)
 	if err != nil {
 		utils.HandleError(err, "解析multipart表单")
 		h.sendErrorResponse(Conn, err)
 		return true
 	}
 
-	uploadId := Conn.Request.FormValue("uploadId")
-	indexStr := Conn.Request.FormValue("index")
-	totalStr := Conn.Request.FormValue("total")
+	uploadId := req.FormValue("uploadId")
+	indexStr := req.FormValue("index")
+	totalStr := req.FormValue("total")
 
 	if uploadId == "" || indexStr == "" || totalStr == "" {
 		h.sendErrorResponse(Conn, fmt.Errorf("missing fields"))
@@ -321,7 +368,7 @@ func (h *UploadHandler) HandleUploadChunk(Conn *SunnyNet.HttpConn) bool {
 
 	utils.Info("[分片上传] 接收分片: uploadId=%s, 分片索引=%d/%d", uploadId, index+1, total)
 
-	file, _, err := Conn.Request.FormFile("chunk")
+	file, _, err := req.FormFile("chunk")
 	if err != nil {
 		utils.HandleError(err, "获取分片文件")
 		h.sendErrorResponse(Conn, err)
@@ -329,13 +376,13 @@ func (h *UploadHandler) HandleUploadChunk(Conn *SunnyNet.HttpConn) bool {
 	}
 	defer file.Close()
 
-	checksum := Conn.Request.FormValue("checksum")
-	algo := strings.ToLower(Conn.Request.FormValue("algo"))
+	checksum := req.FormValue("checksum")
+	algo := strings.ToLower(req.FormValue("algo"))
 	if algo == "" {
 		algo = "md5"
 	}
 	var expectedSize int64 = -1
-	if sz := Conn.Request.FormValue("size"); sz != "" {
+	if sz := req.FormValue("size"); sz != "" {
 		if v, convErr := strconv.ParseInt(sz, 10, 64); convErr == nil {
 			expectedSize = v
 		}
@@ -450,8 +497,15 @@ func (h *UploadHandler) HandleUploadChunk(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleCompleteUpload 处理分片上传完成请求
-func (h *UploadHandler) HandleCompleteUpload(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *UploadHandler) HandleCompleteUpload(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/complete_upload" {
 		return false
 	}
@@ -463,8 +517,8 @@ func (h *UploadHandler) HandleCompleteUpload(Conn *SunnyNet.HttpConn) bool {
 	}
 
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
-			headers := http.Header{}
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
+			headers := sunnyHttp.Header{}
 			headers.Set("Content-Type", "application/json")
 			headers.Set("X-Content-Type-Options", "nosniff")
 			Conn.StopRequest(401, `{"success":false,"error":"unauthorized"}`, headers)
@@ -472,7 +526,7 @@ func (h *UploadHandler) HandleCompleteUpload(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			allowed := false
 			for _, o := range h.getConfig().AllowedOrigins {
@@ -482,7 +536,7 @@ func (h *UploadHandler) HandleCompleteUpload(Conn *SunnyNet.HttpConn) bool {
 				}
 			}
 			if !allowed {
-				headers := http.Header{}
+				headers := sunnyHttp.Header{}
 				headers.Set("Content-Type", "application/json")
 				headers.Set("X-Content-Type-Options", "nosniff")
 				Conn.StopRequest(403, `{"success":false,"error":"forbidden_origin"}`, headers)
@@ -491,16 +545,7 @@ func (h *UploadHandler) HandleCompleteUpload(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 
-	body, err := io.ReadAll(Conn.Request.Body)
-	if err != nil {
-		utils.HandleError(err, "读取complete_upload请求体")
-		h.sendErrorResponse(Conn, err)
-		return true
-	}
-
-	if err := Conn.Request.Body.Close(); err != nil {
-		utils.HandleError(err, "关闭请求体")
-	}
+	body := Conn.GetRequestBody()
 
 	var req struct {
 		UploadId   string `json:"uploadId"`
@@ -629,15 +674,22 @@ func (h *UploadHandler) HandleCompleteUpload(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleSaveVideo 处理直接保存视频文件请求
-func (h *UploadHandler) HandleSaveVideo(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *UploadHandler) HandleSaveVideo(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/save_video" {
 		return false
 	}
 
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
-			headers := http.Header{}
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
+			headers := sunnyHttp.Header{}
 			headers.Set("Content-Type", "application/json")
 			headers.Set("X-Content-Type-Options", "nosniff")
 			Conn.StopRequest(401, `{"success":false,"error":"unauthorized"}`, headers)
@@ -645,7 +697,7 @@ func (h *UploadHandler) HandleSaveVideo(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			allowed := false
 			for _, o := range h.getConfig().AllowedOrigins {
@@ -655,7 +707,7 @@ func (h *UploadHandler) HandleSaveVideo(Conn *SunnyNet.HttpConn) bool {
 				}
 			}
 			if !allowed {
-				headers := http.Header{}
+				headers := sunnyHttp.Header{}
 				headers.Set("Content-Type", "application/json")
 				headers.Set("X-Content-Type-Options", "nosniff")
 				Conn.StopRequest(403, `{"success":false,"error":"forbidden_origin"}`, headers)
@@ -667,7 +719,14 @@ func (h *UploadHandler) HandleSaveVideo(Conn *SunnyNet.HttpConn) bool {
 	utils.Info("🔄 save_video: 开始处理请求")
 
 	// 解析multipart表单
-	err := Conn.Request.ParseMultipartForm(h.getConfig().MaxUploadSize)
+	req, err := h.getStdRequest(Conn)
+	if err != nil {
+		utils.HandleError(err, "创建标准请求")
+		h.sendErrorResponse(Conn, err)
+		return true
+	}
+
+	err = req.ParseMultipartForm(h.getConfig().MaxUploadSize)
 	if err != nil {
 		utils.HandleError(err, "解析表单数据")
 		h.sendErrorResponse(Conn, err)
@@ -676,7 +735,7 @@ func (h *UploadHandler) HandleSaveVideo(Conn *SunnyNet.HttpConn) bool {
 
 	utils.Info("✅ save_video: 表单解析成功")
 
-	file, header, err := Conn.Request.FormFile("video")
+	file, header, err := req.FormFile("video")
 	if err != nil {
 		utils.HandleError(err, "获取视频文件")
 		h.sendErrorResponse(Conn, err)
@@ -686,9 +745,9 @@ func (h *UploadHandler) HandleSaveVideo(Conn *SunnyNet.HttpConn) bool {
 
 	utils.Info("接收上传: %s, 报告大小: %d bytes", header.Filename, header.Size)
 
-	filename := Conn.Request.FormValue("filename")
-	authorName := Conn.Request.FormValue("authorName")
-	isEncrypted := Conn.Request.FormValue("isEncrypted") == "true"
+	filename := req.FormValue("filename")
+	authorName := req.FormValue("authorName")
+	isEncrypted := req.FormValue("isEncrypted") == "true"
 
 	// 创建作者文件夹路径
 	authorFolder := utils.CleanFolderName(authorName)
@@ -775,16 +834,23 @@ func (h *UploadHandler) HandleSaveVideo(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleSaveCover 处理保存封面图片请求
-func (h *UploadHandler) HandleSaveCover(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *UploadHandler) HandleSaveCover(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/save_cover" {
 		return false
 	}
 
 	// 授权校验
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
-			headers := http.Header{}
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
+			headers := sunnyHttp.Header{}
 			headers.Set("Content-Type", "application/json")
 			headers.Set("X-Content-Type-Options", "nosniff")
 			Conn.StopRequest(401, `{"success":false,"error":"unauthorized"}`, headers)
@@ -792,7 +858,7 @@ func (h *UploadHandler) HandleSaveCover(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			allowed := false
 			for _, o := range h.getConfig().AllowedOrigins {
@@ -802,7 +868,7 @@ func (h *UploadHandler) HandleSaveCover(Conn *SunnyNet.HttpConn) bool {
 				}
 			}
 			if !allowed {
-				headers := http.Header{}
+				headers := sunnyHttp.Header{}
 				headers.Set("Content-Type", "application/json")
 				headers.Set("X-Content-Type-Options", "nosniff")
 				Conn.StopRequest(403, `{"success":false,"error":"forbidden_origin"}`, headers)
@@ -812,18 +878,12 @@ func (h *UploadHandler) HandleSaveCover(Conn *SunnyNet.HttpConn) bool {
 	}
 
 	// 只处理 POST 请求
-	if Conn.Request.Method != "POST" {
-		h.sendErrorResponse(Conn, fmt.Errorf("method not allowed: %s", Conn.Request.Method))
+	if Conn.Method() != "POST" {
+		h.sendErrorResponse(Conn, fmt.Errorf("method not allowed: %s", Conn.Method()))
 		return true
 	}
 
-	body, err := io.ReadAll(Conn.Request.Body)
-	if err != nil {
-		utils.HandleError(err, "读取save_cover请求体")
-		h.sendErrorResponse(Conn, err)
-		return true
-	}
-	defer Conn.Request.Body.Close()
+	body := Conn.GetRequestBody()
 
 	var req struct {
 		CoverURL  string `json:"coverUrl"`
@@ -950,16 +1010,23 @@ func (h *UploadHandler) HandleSaveCover(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleDownloadVideo 处理从URL下载视频请求
-func (h *UploadHandler) HandleDownloadVideo(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *UploadHandler) HandleDownloadVideo(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/download_video" {
 		return false
 	}
 
 	// 授权校验
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
-			headers := http.Header{}
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
+			headers := sunnyHttp.Header{}
 			headers.Set("Content-Type", "application/json")
 			headers.Set("X-Content-Type-Options", "nosniff")
 			Conn.StopRequest(401, `{"success":false,"error":"unauthorized"}`, headers)
@@ -967,7 +1034,7 @@ func (h *UploadHandler) HandleDownloadVideo(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			allowed := false
 			for _, o := range h.getConfig().AllowedOrigins {
@@ -977,7 +1044,7 @@ func (h *UploadHandler) HandleDownloadVideo(Conn *SunnyNet.HttpConn) bool {
 				}
 			}
 			if !allowed {
-				headers := http.Header{}
+				headers := sunnyHttp.Header{}
 				headers.Set("Content-Type", "application/json")
 				headers.Set("X-Content-Type-Options", "nosniff")
 				Conn.StopRequest(403, `{"success":false,"error":"forbidden_origin"}`, headers)
@@ -987,25 +1054,18 @@ func (h *UploadHandler) HandleDownloadVideo(Conn *SunnyNet.HttpConn) bool {
 	}
 
 	// 只处理 POST 请求
-	if Conn.Request.Method != "POST" {
-		h.sendErrorResponse(Conn, fmt.Errorf("method not allowed: %s", Conn.Request.Method))
+	if Conn.Method() != "POST" {
+		h.sendErrorResponse(Conn, fmt.Errorf("method not allowed: %s", Conn.Method()))
 		return true
 	}
 
 	// check body
-	if Conn.Request.Body == nil {
-		utils.Error("Handler request body is nil")
-		h.sendErrorResponse(Conn, fmt.Errorf("request body is nil"))
+	body := Conn.GetRequestBody()
+	if len(body) == 0 {
+		utils.Error("Handler request body is empty")
+		h.sendErrorResponse(Conn, fmt.Errorf("request body is empty"))
 		return true
 	}
-
-	body, err := io.ReadAll(Conn.Request.Body)
-	if err != nil {
-		utils.HandleError(err, "读取download_video请求体")
-		h.sendErrorResponse(Conn, err)
-		return true
-	}
-	defer Conn.Request.Body.Close()
 
 	var req struct {
 		VideoURL     string `json:"videoUrl"`
@@ -1191,7 +1251,7 @@ func (h *UploadHandler) HandleDownloadVideo(Conn *SunnyNet.HttpConn) bool {
 	utils.Info("🚀 [视频下载] 使用 Gopeed 引擎: %s", req.Title)
 
 	// 创建 Context (支持取消)
-	ctx, cancel := context.WithCancel(Conn.Request.Context())
+	ctx, cancel := context.WithCancel(context.Background())
 	h.activeDownloads.Store(req.VideoID, cancel)
 	defer h.activeDownloads.Delete(req.VideoID)
 	// 注意：这里不要由 defer 调用 cancel()，因为 DownloadSync 是阻塞的
@@ -1543,15 +1603,22 @@ func (h *UploadHandler) downloadVideoWithRetry(ctx context.Context, client *http
 }
 
 // HandleUploadStatus 查询已上传的分片列表
-func (h *UploadHandler) HandleUploadStatus(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *UploadHandler) HandleUploadStatus(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/upload_status" {
 		return false
 	}
 
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
-			headers := http.Header{}
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
+			headers := sunnyHttp.Header{}
 			headers.Set("Content-Type", "application/json")
 			headers.Set("X-Content-Type-Options", "nosniff")
 			Conn.StopRequest(401, `{"success":false,"error":"unauthorized"}`, headers)
@@ -1559,7 +1626,7 @@ func (h *UploadHandler) HandleUploadStatus(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			allowed := false
 			for _, o := range h.getConfig().AllowedOrigins {
@@ -1569,7 +1636,7 @@ func (h *UploadHandler) HandleUploadStatus(Conn *SunnyNet.HttpConn) bool {
 				}
 			}
 			if !allowed {
-				headers := http.Header{}
+				headers := sunnyHttp.Header{}
 				headers.Set("Content-Type", "application/json")
 				headers.Set("X-Content-Type-Options", "nosniff")
 				Conn.StopRequest(403, `{"success":false,"error":"forbidden_origin"}`, headers)
@@ -1578,12 +1645,7 @@ func (h *UploadHandler) HandleUploadStatus(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 
-	body, err := io.ReadAll(Conn.Request.Body)
-	if err != nil {
-		h.sendErrorResponse(Conn, err)
-		return true
-	}
-	_ = Conn.Request.Body.Close()
+	body := Conn.GetRequestBody()
 
 	var req struct {
 		UploadId string `json:"uploadId"`
@@ -1629,15 +1691,15 @@ func (h *UploadHandler) HandleUploadStatus(Conn *SunnyNet.HttpConn) bool {
 }
 
 // sendSuccessResponse 发送成功响应
-func (h *UploadHandler) sendSuccessResponse(Conn *SunnyNet.HttpConn) {
-	headers := http.Header{}
+func (h *UploadHandler) sendSuccessResponse(Conn SunnyNet.ConnHTTP) {
+	headers := sunnyHttp.Header{}
 	headers.Set("Content-Type", "application/json")
 	headers.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	headers.Set("Pragma", "no-cache")
 	headers.Set("Expires", "0")
 	headers.Set("X-Content-Type-Options", "nosniff")
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			for _, o := range h.getConfig().AllowedOrigins {
 				if o == origin {
@@ -1654,15 +1716,15 @@ func (h *UploadHandler) sendSuccessResponse(Conn *SunnyNet.HttpConn) {
 }
 
 // sendJSONResponse 发送JSON响应
-func (h *UploadHandler) sendJSONResponse(Conn *SunnyNet.HttpConn, statusCode int, body []byte) {
-	headers := http.Header{}
+func (h *UploadHandler) sendJSONResponse(Conn SunnyNet.ConnHTTP, statusCode int, body []byte) {
+	headers := sunnyHttp.Header{}
 	headers.Set("Content-Type", "application/json")
 	headers.Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	headers.Set("Pragma", "no-cache")
 	headers.Set("Expires", "0")
 	headers.Set("X-Content-Type-Options", "nosniff")
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			for _, o := range h.getConfig().AllowedOrigins {
 				if o == origin {
@@ -1679,12 +1741,12 @@ func (h *UploadHandler) sendJSONResponse(Conn *SunnyNet.HttpConn, statusCode int
 }
 
 // sendErrorResponse 发送错误响应
-func (h *UploadHandler) sendErrorResponse(Conn *SunnyNet.HttpConn, err error) {
-	headers := http.Header{}
+func (h *UploadHandler) sendErrorResponse(Conn SunnyNet.ConnHTTP, err error) {
+	headers := sunnyHttp.Header{}
 	headers.Set("Content-Type", "application/json")
 	headers.Set("X-Content-Type-Options", "nosniff")
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			for _, o := range h.getConfig().AllowedOrigins {
 				if o == origin {

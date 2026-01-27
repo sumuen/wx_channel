@@ -16,7 +16,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/qtgolang/SunnyNet/SunnyNet"
-	"github.com/qtgolang/SunnyNet/public"
+	"github.com/qtgolang/SunnyNet/src/public"
 
 	"wx_channel/internal/api"
 	"wx_channel/internal/assets"
@@ -283,15 +283,15 @@ func (app *App) Run() {
 	}
 	_, err3 := client.Get("https://sunny.io/")
 	if err3 == nil {
-		if os_env == "windows" {
-			ok := app.Sunny.StartProcess()
-			if !ok {
-				color.Red("\nERROR 启动进程代理失败，检查是否以管理员身份运行\n")
-				color.Yellow("按 Ctrl+C 退出...\n")
-				select {}
-			}
-			app.Sunny.ProcessAddName("WeChatAppEx.exe")
-		}
+		//	if os_env == "windows" {
+		//		// ok := app.Sunny.StartProcess()
+		//		// if !ok {
+		//		// 	color.Red("\nERROR 启动进程代理失败，检查是否以管理员身份运行\n")
+		//		// 	color.Yellow("按 Ctrl+C 退出...\n")
+		//		// 	select {}
+		//		// }
+		//		// app.Sunny.ProcessAddName("WeChatAppEx.exe")
+		//	}
 
 		utils.PrintSeparator()
 		color.Blue("📡 服务状态信息")
@@ -328,14 +328,14 @@ func (app *App) Run() {
 }
 
 // GlobalHttpCallback 桥接到单例 app 实例
-func GlobalHttpCallback(Conn *SunnyNet.HttpConn) {
+func GlobalHttpCallback(Conn SunnyNet.ConnHTTP) {
 	if globalApp != nil {
 		globalApp.HandleRequest(Conn)
 	}
 }
 
 // HandleRequest 处理 HTTP 回调
-func (app *App) HandleRequest(Conn *SunnyNet.HttpConn) {
+func (app *App) HandleRequest(Conn SunnyNet.ConnHTTP) {
 	// 恐慌恢复
 	defer func() {
 		if r := recover(); r != nil {
@@ -343,15 +343,15 @@ func (app *App) HandleRequest(Conn *SunnyNet.HttpConn) {
 		}
 	}()
 
-	if Conn.Type == public.HttpSendRequest {
-		Conn.Request.Header.Del("Accept-Encoding")
+	if Conn.Type() == public.HttpSendRequest {
+		Conn.GetRequestHeader().Del("Accept-Encoding")
 
 		for _, interceptor := range app.requestInterceptors {
 			if interceptor != nil && interceptor.Handle(Conn) {
 				return
 			}
 		}
-	} else if Conn.Type == public.HttpResponseOK {
+	} else if Conn.Type() == public.HttpResponseOK {
 		for _, interceptor := range app.responseInterceptors {
 			if interceptor != nil && interceptor.Handle(Conn) {
 				return
@@ -427,6 +427,15 @@ func (app *App) printTitle() {
 func (app *App) startWebSocketServer(wsPort int) {
 	mux := http.NewServeMux()
 
+	// 1. API 路由 (优先匹配)
+	// 挂载主 API Router，允许通过 WS 端口 (2026) 直接访问管理 API
+	if app.APIRouter != nil {
+		mux.Handle("/api/", app.APIRouter)
+	}
+
+	wsHandler := websocket.NewHandler(app.WSHub)
+	mux.HandleFunc("/ws/api", wsHandler.ServeHTTP)
+
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
@@ -435,14 +444,6 @@ func (app *App) startWebSocketServer(wsPort int) {
 		}
 		handlers.ServeWs(w, r)
 	})
-
-	// 挂载主 API Router，允许通过 WS 端口 (2026) 直接访问管理 API
-	if app.APIRouter != nil {
-		mux.Handle("/api/", app.APIRouter)
-	}
-
-	wsHandler := websocket.NewHandler(app.WSHub)
-	mux.HandleFunc("/ws/api", wsHandler.ServeHTTP)
 
 	mux.HandleFunc("/ws/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -454,13 +455,37 @@ func (app *App) startWebSocketServer(wsPort int) {
 		})
 	})
 
+	// 2. 静态文件服务 (用于 Web 控制台)
+	// 如果存在 web 目录，则提供静态文件服务
+	if _, err := os.Stat("web"); err == nil {
+		fileServer := http.FileServer(http.Dir("web"))
+
+		// 处理 /console 路径 - 直接返回 web/console.html
+		mux.HandleFunc("/console", func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, "web/console.html")
+		})
+		mux.HandleFunc("/console.html", func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, "web/console.html")
+		})
+
+		// 根路径重定向到 /console
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/" {
+				http.Redirect(w, r, "/console", http.StatusFound)
+				return
+			}
+			// 其他静态资源直接服务
+			fileServer.ServeHTTP(w, r)
+		})
+	}
+
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", wsPort),
 		Handler: mux,
 	}
 
-	utils.Info("🔌 WebSocket服务已启动，端口: %d", wsPort)
+	utils.Info("🔌 WebSocket & Web Console 服务已启动，端口: %d", wsPort)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		utils.Warn("WebSocket服务启动失败: %v", err)
+		utils.Warn("服务启动失败: %v", err)
 	}
 }

@@ -3,8 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/qtgolang/SunnyNet/SunnyNet"
+	sunnyHttp "github.com/qtgolang/SunnyNet/src/http"
 )
 
 // RecordHandler 下载记录处理器
@@ -46,7 +46,7 @@ func (h *RecordHandler) GetCurrentURL() string {
 }
 
 // Handle implements router.Interceptor
-func (h *RecordHandler) Handle(Conn *SunnyNet.HttpConn) bool {
+func (h *RecordHandler) Handle(Conn SunnyNet.ConnHTTP) bool {
 
 	if h.HandleRecordDownload(Conn) {
 		return true
@@ -58,15 +58,22 @@ func (h *RecordHandler) Handle(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleRecordDownload 处理记录下载信息请求
-func (h *RecordHandler) HandleRecordDownload(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *RecordHandler) HandleRecordDownload(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/record_download" {
 		return false
 	}
 
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
-			headers := http.Header{}
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
+			headers := sunnyHttp.Header{}
 			headers.Set("Content-Type", "application/json")
 			headers.Set("X-Content-Type-Options", "nosniff")
 			Conn.StopRequest(401, `{"success":false,"error":"unauthorized"}`, headers)
@@ -75,16 +82,7 @@ func (h *RecordHandler) HandleRecordDownload(Conn *SunnyNet.HttpConn) bool {
 	}
 
 	var data map[string]interface{}
-	body, err := io.ReadAll(Conn.Request.Body)
-	if err != nil {
-		utils.HandleError(err, "读取record_download请求体")
-		h.sendErrorResponse(Conn, err)
-		return true
-	}
-
-	if err := Conn.Request.Body.Close(); err != nil {
-		utils.HandleError(err, "关闭请求体")
-	}
+	body := Conn.GetRequestBody()
 
 	// 检查body是否为空
 	if len(body) == 0 {
@@ -169,15 +167,22 @@ func (h *RecordHandler) HandleRecordDownload(Conn *SunnyNet.HttpConn) bool {
 }
 
 // HandleBatchDownloadStatus 处理批量下载状态查询请求
-func (h *RecordHandler) HandleBatchDownloadStatus(Conn *SunnyNet.HttpConn) bool {
-	path := Conn.Request.URL.Path
+func (h *RecordHandler) HandleBatchDownloadStatus(Conn SunnyNet.ConnHTTP) bool {
+	if Conn.URL() == "" {
+		return false
+	}
+	u, err := url.Parse(Conn.URL())
+	if err != nil {
+		return false
+	}
+	path := u.Path
 	if path != "/__wx_channels_api/batch_download_status" {
 		return false
 	}
 
 	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
-		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
-			headers := http.Header{}
+		if Conn.GetRequestHeader().Get("X-Local-Auth") != h.getConfig().SecretToken {
+			headers := sunnyHttp.Header{}
 			headers.Set("Content-Type", "application/json")
 			headers.Set("X-Content-Type-Options", "nosniff")
 			Conn.StopRequest(401, `{"success":false,"error":"unauthorized"}`, headers)
@@ -191,16 +196,7 @@ func (h *RecordHandler) HandleBatchDownloadStatus(Conn *SunnyNet.HttpConn) bool 
 		Status  string `json:"status"`
 	}
 
-	body, err := io.ReadAll(Conn.Request.Body)
-	if err != nil {
-		utils.HandleError(err, "读取batch_download_status请求体")
-		h.sendErrorResponse(Conn, err)
-		return true
-	}
-
-	if err := Conn.Request.Body.Close(); err != nil {
-		utils.HandleError(err, "关闭请求体")
-	}
+	body := Conn.GetRequestBody()
 
 	if err := json.Unmarshal(body, &statusData); err != nil {
 		utils.HandleError(err, "解析批量下载状态")
@@ -239,12 +235,12 @@ func (h *RecordHandler) inferPageSource(url string) string {
 }
 
 // sendEmptyResponse 发送空JSON响应
-func (h *RecordHandler) sendEmptyResponse(Conn *SunnyNet.HttpConn) {
-	headers := http.Header{}
+func (h *RecordHandler) sendEmptyResponse(Conn SunnyNet.ConnHTTP) {
+	headers := sunnyHttp.Header{}
 	headers.Set("Content-Type", "application/json")
 	headers.Set("X-Content-Type-Options", "nosniff")
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			for _, o := range h.getConfig().AllowedOrigins {
 				if o == origin {
@@ -262,12 +258,12 @@ func (h *RecordHandler) sendEmptyResponse(Conn *SunnyNet.HttpConn) {
 }
 
 // sendErrorResponse 发送错误响应
-func (h *RecordHandler) sendErrorResponse(Conn *SunnyNet.HttpConn, err error) {
-	headers := http.Header{}
+func (h *RecordHandler) sendErrorResponse(Conn SunnyNet.ConnHTTP, err error) {
+	headers := sunnyHttp.Header{}
 	headers.Set("Content-Type", "application/json")
 	headers.Set("X-Content-Type-Options", "nosniff")
 	if h.getConfig() != nil && len(h.getConfig().AllowedOrigins) > 0 {
-		origin := Conn.Request.Header.Get("Origin")
+		origin := Conn.GetRequestHeader().Get("Origin")
 		if origin != "" {
 			for _, o := range h.getConfig().AllowedOrigins {
 				if o == origin {
