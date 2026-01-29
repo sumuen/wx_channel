@@ -166,3 +166,4 @@ log.png
 # - *.zip         所有压缩文件
 # - *.exe         编译产物
 wx_channel
+third_party/

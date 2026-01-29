@@ -209,9 +209,11 @@ function __show_batch_download_ui__(videos, title) {
     '</div>' +
 
     // 次要操作区
-    '<div style="padding:12px 20px;border-top:1px solid rgba(255,255,255,0.08);display:flex;gap:8px;">' +
-    '<button id="batch-export-btn" style="flex:1;background:transparent;color:#999;border:1px solid rgba(255,255,255,0.12);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">导出列表</button>' +
-    '<button id="batch-clear-btn" style="flex:1;background:transparent;color:#999;border:1px solid rgba(255,255,255,0.12);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">清空列表</button>' +
+    '<div style="padding:12px 20px;border-top:1px solid rgba(255,255,255,0.08);display:flex;gap:8px;flex-wrap:wrap;">' +
+    '<button id="batch-export-details-btn" style="flex:1;min-width:calc(50% - 4px);background:#1a73e8;color:#fff;border:none;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">📊 导出详情</button>' +
+    '<button id="batch-print-details-btn" style="flex:1;min-width:calc(50% - 4px);background:transparent;color:#999;border:1px solid rgba(255,255,255,0.12);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">🖨️ 打印详情</button>' +
+    '<button id="batch-export-btn" style="flex:1;min-width:calc(50% - 4px);background:transparent;color:#999;border:1px solid rgba(255,255,255,0.12);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">导出JSON</button>' +
+    '<button id="batch-clear-btn" style="flex:1;min-width:calc(50% - 4px);background:transparent;color:#999;border:1px solid rgba(255,255,255,0.12);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">清空列表</button>' +
     '</div>';
 
   document.body.appendChild(ui);
@@ -259,7 +261,37 @@ function __show_batch_download_ui__(videos, title) {
       __wx_batch_download_manager__.forceRedownload = this.checked;
     };
 
-    // 导出列表
+    // 导出详情（CSV）
+    var exportDetailsBtn = document.getElementById('batch-export-details-btn');
+    if (exportDetailsBtn) {
+      exportDetailsBtn.addEventListener('mouseenter', function () {
+        this.style.background = '#1557b0';
+      });
+      exportDetailsBtn.addEventListener('mouseleave', function () {
+        this.style.background = '#1a73e8';
+      });
+      exportDetailsBtn.addEventListener('click', function () {
+        __export_video_details_csv__();
+      });
+    }
+
+    // 打印详情到控制台
+    var printDetailsBtn = document.getElementById('batch-print-details-btn');
+    if (printDetailsBtn) {
+      printDetailsBtn.addEventListener('mouseenter', function () {
+        this.style.background = 'rgba(255,255,255,0.08)';
+        this.style.color = '#fff';
+      });
+      printDetailsBtn.addEventListener('mouseleave', function () {
+        this.style.background = 'transparent';
+        this.style.color = '#999';
+      });
+      printDetailsBtn.addEventListener('click', function () {
+        __print_video_details__();
+      });
+    }
+
+    // 导出列表（JSON）
     var exportBtn = document.getElementById('batch-export-btn');
     if (exportBtn) {
       exportBtn.addEventListener('mouseenter', function () {
@@ -438,6 +470,231 @@ function __export_batch_video_list__() {
   URL.revokeObjectURL(url);
 
   __wx_log({ msg: '📤 已导出 ' + exportData.length + ' 个视频（含来源标记）' });
+}
+
+// ==================== 导出视频详细信息（CSV格式） ====================
+function __export_video_details_csv__() {
+  var videos = __wx_batch_download_manager__.videos;
+
+  if (videos.length === 0) {
+    __wx_log({ msg: '⚠️ 没有可导出的视频' });
+    return;
+  }
+
+  // 格式化时长函数
+  function formatDuration(ms) {
+    if (!ms) return '';
+    var totalSeconds = Math.floor(ms / 1000);
+    var hours = Math.floor(totalSeconds / 3600);
+    var minutes = Math.floor((totalSeconds % 3600) / 60);
+    var seconds = totalSeconds % 60;
+    if (hours > 0) {
+      return hours.toString().padStart(2, '0') + ':' +
+             minutes.toString().padStart(2, '0') + ':' +
+             seconds.toString().padStart(2, '0');
+    }
+    return minutes.toString().padStart(2, '0') + ':' +
+           seconds.toString().padStart(2, '0');
+  }
+
+  // 格式化文件大小函数
+  function formatSize(bytes) {
+    if (!bytes) return '';
+    var mb = bytes / (1024 * 1024);
+    return mb.toFixed(2) + ' MB';
+  }
+
+  // 格式化数字函数（万、千）
+  function formatCount(count) {
+    if (count === undefined || count === null) return '';
+    if (count >= 10000) {
+      return (count / 10000).toFixed(1) + '万';
+    }
+    return count.toString();
+  }
+
+  // 格式化时间函数
+  function formatTime(timestamp) {
+    if (!timestamp) return '';
+    var date = new Date(timestamp * 1000);
+    var year = date.getFullYear();
+    var month = (date.getMonth() + 1).toString().padStart(2, '0');
+    var day = date.getDate().toString().padStart(2, '0');
+    var hours = date.getHours().toString().padStart(2, '0');
+    var minutes = date.getMinutes().toString().padStart(2, '0');
+    var seconds = date.getSeconds().toString().padStart(2, '0');
+    return year + '-' + month + '-' + day + ' ' + hours + ':' + minutes + ':' + seconds;
+  }
+
+  // 获取IP所在地
+  function getIpLocation(ipRegionInfo) {
+    if (!ipRegionInfo) return '';
+    // ipRegionInfo 可能是对象 {regionDesc: "浙江"} 或字符串
+    if (typeof ipRegionInfo === 'string') return ipRegionInfo;
+    if (ipRegionInfo.regionDesc) return ipRegionInfo.regionDesc;
+    if (ipRegionInfo.region) return ipRegionInfo.region;
+    return '';
+  }
+
+  // CSV 转义函数
+  function escapeCSV(str) {
+    if (str === undefined || str === null) return '';
+    str = String(str);
+    // 如果包含逗号、换行或引号，需要用引号包围并转义
+    if (str.includes(',') || str.includes('\n') || str.includes('"') || str.includes('\r')) {
+      return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+  }
+
+  // CSV 表头（中文）
+  var headers = ['视频号名称', '视频标题', '视频时长', '视频大小', '点赞量', '评论量', '收藏量', '转发量', '创建时间', 'IP所在地', '视频ID', '封面链接'];
+  var csvContent = '\uFEFF' + headers.join(',') + '\n'; // \uFEFF 是 BOM，确保 Excel 正确识别 UTF-8
+
+  // 处理每个视频
+  videos.forEach(function (v) {
+    var media = v.objectDesc && v.objectDesc.media && v.objectDesc.media[0];
+    
+    var nickname = v.nickname || (v.contact && v.contact.nickname) || '';
+    var title = v.title || (v.objectDesc && v.objectDesc.description) || '无标题';
+    var duration = v.duration || (media && (media.videoPlayLen * 1000 || (media.spec && media.spec[0] && media.spec[0].durationMs))) || 0;
+    var size = v.size || (media && media.fileSize) || 0;
+    var likeCount = v.likeCount || 0;
+    var commentCount = v.commentCount || 0;
+    var favCount = v.favCount || 0;
+    var forwardCount = v.forwardCount || 0;
+    var createtime = v.createtime || 0;
+    var ipRegionInfo = v.ipRegionInfo || (v.objectDesc && v.objectDesc.ipRegionInfo);
+    var videoId = v.id || '';
+    var coverUrl = v.thumbUrl || v.coverUrl || (media && media.thumbUrl) || '';
+
+    var row = [
+      escapeCSV(nickname),
+      escapeCSV(title),
+      escapeCSV(formatDuration(duration)),
+      escapeCSV(formatSize(size)),
+      escapeCSV(formatCount(likeCount)),
+      escapeCSV(formatCount(commentCount)),
+      escapeCSV(formatCount(favCount)),
+      escapeCSV(formatCount(forwardCount)),
+      escapeCSV(formatTime(createtime)),
+      escapeCSV(getIpLocation(ipRegionInfo)),
+      escapeCSV(videoId),
+      escapeCSV(coverUrl)
+    ];
+
+    csvContent += row.join(',') + '\n';
+  });
+
+  // 下载 CSV 文件
+  var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = '视频详情_' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+
+  __wx_log({ msg: '📊 已导出 ' + videos.length + ' 个视频详情（CSV格式）' });
+}
+
+// ==================== 打印视频详情到控制台 ====================
+function __print_video_details__() {
+  var videos = __wx_batch_download_manager__.videos;
+
+  if (videos.length === 0) {
+    __wx_log({ msg: '⚠️ 没有视频数据' });
+    return;
+  }
+
+  // 格式化时长函数
+  function formatDuration(ms) {
+    if (!ms) return '00:00';
+    var totalSeconds = Math.floor(ms / 1000);
+    var hours = Math.floor(totalSeconds / 3600);
+    var minutes = Math.floor((totalSeconds % 3600) / 60);
+    var seconds = totalSeconds % 60;
+    if (hours > 0) {
+      return hours.toString().padStart(2, '0') + ':' +
+             minutes.toString().padStart(2, '0') + ':' +
+             seconds.toString().padStart(2, '0');
+    }
+    return minutes.toString().padStart(2, '0') + ':' +
+           seconds.toString().padStart(2, '0');
+  }
+
+  // 格式化文件大小函数
+  function formatSize(bytes) {
+    if (!bytes) return '未知';
+    var mb = bytes / (1024 * 1024);
+    return mb.toFixed(2) + ' MB';
+  }
+
+  // 格式化数字函数（万、千）
+  function formatCount(count) {
+    if (count === undefined || count === null) return '0';
+    if (count >= 10000) {
+      return (count / 10000).toFixed(1) + '万';
+    }
+    return count.toString();
+  }
+
+  // 格式化时间函数
+  function formatTime(timestamp) {
+    if (!timestamp) return '未知';
+    var date = new Date(timestamp * 1000);
+    var year = date.getFullYear();
+    var month = (date.getMonth() + 1).toString().padStart(2, '0');
+    var day = date.getDate().toString().padStart(2, '0');
+    var hours = date.getHours().toString().padStart(2, '0');
+    var minutes = date.getMinutes().toString().padStart(2, '0');
+    var seconds = date.getSeconds().toString().padStart(2, '0');
+    return year + '-' + month + '-' + day + ' ' + hours + ':' + minutes + ':' + seconds;
+  }
+
+  // 获取IP所在地
+  function getIpLocation(ipRegionInfo) {
+    if (!ipRegionInfo) return '未知';
+    if (typeof ipRegionInfo === 'string') return ipRegionInfo;
+    if (ipRegionInfo.regionDesc) return ipRegionInfo.regionDesc;
+    if (ipRegionInfo.region) return ipRegionInfo.region;
+    return '未知';
+  }
+
+  console.log('\n' + '═'.repeat(70));
+  console.log('📊 视频详细信息列表（共 ' + videos.length + ' 个）');
+  console.log('═'.repeat(70));
+
+  videos.forEach(function (v, index) {
+    var media = v.objectDesc && v.objectDesc.media && v.objectDesc.media[0];
+    
+    var nickname = v.nickname || (v.contact && v.contact.nickname) || '未知';
+    var title = v.title || (v.objectDesc && v.objectDesc.description) || '无标题';
+    var duration = v.duration || (media && (media.videoPlayLen * 1000 || (media.spec && media.spec[0] && media.spec[0].durationMs))) || 0;
+    var size = v.size || (media && media.fileSize) || 0;
+    var likeCount = v.likeCount || 0;
+    var commentCount = v.commentCount || 0;
+    var createtime = v.createtime || 0;
+    var ipRegionInfo = v.ipRegionInfo || (v.objectDesc && v.objectDesc.ipRegionInfo);
+
+    console.log('\n─'.repeat(70));
+    console.log('📹 #' + (index + 1));
+    console.log('─'.repeat(70));
+    console.log('👤 视频号名称: ' + nickname);
+    console.log('📝 视频标题: ' + title);
+    console.log('⏱️ 视频时长: ' + formatDuration(duration));
+    console.log('📦 视频大小: ' + formatSize(size));
+    console.log('👍 点赞量: ' + formatCount(likeCount));
+    console.log('💬 评论量: ' + formatCount(commentCount));
+    console.log('📅 创建时间: ' + formatTime(createtime));
+    console.log('🌍 IP所在地: ' + getIpLocation(ipRegionInfo));
+  });
+
+  console.log('\n' + '═'.repeat(70));
+  console.log('📊 统计完成');
+  console.log('═'.repeat(70) + '\n');
+
+  __wx_log({ msg: '📊 已打印 ' + videos.length + ' 个视频详情到控制台' });
 }
 
 // ==================== 清空视频列表 ====================

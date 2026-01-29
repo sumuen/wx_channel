@@ -19,6 +19,9 @@ require (
 	modernc.org/sqlite v1.33.1
 )
 
+replace github.com/qtgolang/SunnyNet => ./third_party/SunnyNet
+replace github.com/anacrolix/go-libutp => ./third_party/go-libutp
+
 require (
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/Microsoft/go-winio v0.6.1 // indirect
