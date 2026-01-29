@@ -211,7 +211,6 @@ function __show_batch_download_ui__(videos, title) {
     // 次要操作区
     '<div style="padding:12px 20px;border-top:1px solid rgba(255,255,255,0.08);display:flex;gap:8px;flex-wrap:wrap;">' +
     '<button id="batch-export-details-btn" style="flex:1;min-width:calc(50% - 4px);background:#1a73e8;color:#fff;border:none;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">📊 导出详情</button>' +
-    '<button id="batch-print-details-btn" style="flex:1;min-width:calc(50% - 4px);background:transparent;color:#999;border:1px solid rgba(255,255,255,0.12);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">🖨️ 打印详情</button>' +
     '<button id="batch-export-btn" style="flex:1;min-width:calc(50% - 4px);background:transparent;color:#999;border:1px solid rgba(255,255,255,0.12);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">导出JSON</button>' +
     '<button id="batch-clear-btn" style="flex:1;min-width:calc(50% - 4px);background:transparent;color:#999;border:1px solid rgba(255,255,255,0.12);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">清空列表</button>' +
     '</div>';
@@ -274,23 +273,6 @@ function __show_batch_download_ui__(videos, title) {
         __export_video_details_csv__();
       });
     }
-
-    // 打印详情到控制台
-    var printDetailsBtn = document.getElementById('batch-print-details-btn');
-    if (printDetailsBtn) {
-      printDetailsBtn.addEventListener('mouseenter', function () {
-        this.style.background = 'rgba(255,255,255,0.08)';
-        this.style.color = '#fff';
-      });
-      printDetailsBtn.addEventListener('mouseleave', function () {
-        this.style.background = 'transparent';
-        this.style.color = '#999';
-      });
-      printDetailsBtn.addEventListener('click', function () {
-        __print_video_details__();
-      });
-    }
-
     // 导出列表（JSON）
     var exportBtn = document.getElementById('batch-export-btn');
     if (exportBtn) {
@@ -586,12 +568,82 @@ function __export_video_details_csv__() {
     csvContent += row.join(',') + '\n';
   });
 
+  // 获取搜索关键词（如果是在搜索页面）
+  var filename = '视频详情_';
+  var isSearchPage = window.location.pathname.includes('/pages/s');
+  var keyword = null;
+  
+  if (isSearchPage) {
+    // 方案1: 从 window.__wx_channels_search_data.keyword 获取
+    if (window.__wx_channels_search_data && window.__wx_channels_search_data.keyword) {
+      keyword = window.__wx_channels_search_data.keyword;
+    }
+    // 方案2: 从URL参数获取
+    else {
+      var urlParams = new URLSearchParams(window.location.search);
+      keyword = urlParams.get('keyword') || urlParams.get('q') || urlParams.get('query');
+    }
+    // 方案3: 从页面输入框获取
+    if (!keyword) {
+      try {
+        var searchInputs = document.querySelectorAll('input[type="search"], input[placeholder*="搜索"], input[placeholder*="Search"]');
+        for (var i = 0; i < searchInputs.length; i++) {
+          var input = searchInputs[i];
+          if (input.value && input.value.trim()) {
+            keyword = input.value.trim();
+            break;
+          }
+        }
+      } catch (e) {
+        // 忽略错误
+      }
+    }
+    // 方案4: 从URL路径中提取
+    if (!keyword) {
+      try {
+        var pathParts = window.location.pathname.split('/');
+        for (var i = pathParts.length - 1; i >= 0; i--) {
+          var part = decodeURIComponent(pathParts[i]);
+          if (part && part.length > 0 && part !== 's' && part !== 'pages') {
+            keyword = part;
+            break;
+          }
+        }
+      } catch (e) {
+        // 忽略错误
+      }
+    }
+    
+    // 清理文件名中的非法字符并添加到文件名
+    if (keyword) {
+      keyword = keyword.replace(/[<>:"/\\|?*]/g, '_').trim();
+      if (keyword && keyword !== '') {
+        filename += keyword + '_';
+      } else {
+        keyword = null;
+      }
+    }
+    
+    // 仅在无法提取关键词时输出调试信息
+    if (!keyword) {
+      var debugInfo = {
+        hasSearchData: !!window.__wx_channels_search_data,
+        searchDataKeys: window.__wx_channels_search_data ? Object.keys(window.__wx_channels_search_data) : [],
+        urlSearch: window.location.search,
+        urlPathname: window.location.pathname
+      };
+      __wx_log({ msg: '[批量下载-导出CSV] ⚠️ 无法提取搜索关键词: ' + JSON.stringify(debugInfo) });
+    }
+  }
+  
+  filename += new Date().toISOString().slice(0, 10) + '.csv';
+
   // 下载 CSV 文件
   var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
   var url = URL.createObjectURL(blob);
   var a = document.createElement('a');
   a.href = url;
-  a.download = '视频详情_' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
 
